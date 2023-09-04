@@ -1,112 +1,151 @@
-# src/q_learning_agent.py
-
-import gymnasium as gym
 import numpy as np
 import random
-import matplotlib.pyplot as plt
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(levelname)s - %(message)s\')
+logger = logging.getLogger(__name__)
 
 class QLearningAgent:
     """
-    A Q-Learning agent implementation for discrete action spaces.
+    A simple Q-Learning agent for discrete state and action spaces.
+    This agent learns an optimal policy by updating a Q-table based on
+    the rewards received from the environment.
     """
-    def __init__(self, env, learning_rate=0.1, discount_factor=0.99, epsilon=1.0, epsilon_decay_rate=0.001, min_epsilon=0.01):
-        self.env = env
+    def __init__(self, num_states, num_actions, learning_rate=0.1, discount_factor=0.99, exploration_rate=1.0, exploration_decay=0.995, min_exploration_rate=0.01):
+        """
+        Initializes the Q-Learning agent.
+        
+        Args:
+            num_states (int): The number of possible states in the environment.
+            num_actions (int): The number of possible actions the agent can take.
+            learning_rate (float): The learning rate (alpha) for updating Q-values.
+            discount_factor (float): The discount factor (gamma) for future rewards.
+            exploration_rate (float): The initial exploration rate (epsilon) for epsilon-greedy policy.
+            exploration_decay (float): The decay rate for the exploration rate.
+            min_exploration_rate (float): The minimum exploration rate.
+        """
+        self.num_states = num_states
+        self.num_actions = num_actions
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
-        self.epsilon = epsilon
-        self.epsilon_decay_rate = epsilon_decay_rate
-        self.min_epsilon = min_epsilon
-
+        self.exploration_rate = exploration_rate
+        self.exploration_decay = exploration_decay
+        self.min_exploration_rate = min_exploration_rate
+        
         # Initialize Q-table with zeros
-        # Assuming discrete observation space for simplicity (e.g., CartPole-v1 state discretization)
-        # For continuous spaces, a function approximator (like a neural network) would be needed.
-        if isinstance(env.observation_space, gym.spaces.Box):
-            # Discretize continuous observation space for Q-table
-            self.q_table = self._create_q_table_for_continuous_env(env)
-        else:
-            self.q_table = np.zeros((env.observation_space.n, env.action_space.n))
-
-    def _create_q_table_for_continuous_env(self, env):
-        # Example discretization for CartPole-v1
-        # Cart Position: -2.4 to 2.4 -> 10 bins
-        # Cart Velocity: -4 to 4 -> 10 bins
-        # Pole Angle: -0.2095 to 0.2095 -> 10 bins
-        # Pole Angular Velocity: -4 to 4 -> 10 bins
-        self.pos_space = np.linspace(-2.4, 2.4, 10)
-        self.vel_space = np.linspace(-4, 4, 10)
-        self.ang_space = np.linspace(-0.2095, 0.2095, 10)
-        self.ang_vel_space = np.linspace(-4, 4, 10)
-        return np.zeros((len(self.pos_space)+1, len(self.vel_space)+1, len(self.ang_space)+1, len(self.ang_vel_space)+1, env.action_space.n))
-
-    def _get_state_index(self, state):
-        if isinstance(self.env.observation_space, gym.spaces.Box):
-            # Discretize state for continuous environments
-            pos_idx = np.digitize(state[0], self.pos_space)
-            vel_idx = np.digitize(state[1], self.vel_space)
-            ang_idx = np.digitize(state[2], self.ang_space)
-            ang_vel_idx = np.digitize(state[3], self.ang_vel_space)
-            return (pos_idx, vel_idx, ang_idx, ang_vel_idx)
-        else:
-            return state
+        self.q_table = np.zeros((num_states, num_actions))
+        logger.info(f"Initialized QLearningAgent with {num_states} states and {num_actions} actions.")
 
     def choose_action(self, state):
-        if random.uniform(0, 1) < self.epsilon:
-            return self.env.action_space.sample()  # Explore action space
-        else:
-            state_idx = self._get_state_index(state)
-            return np.argmax(self.q_table[state_idx]) # Exploit learned values
-
-    def update_q_table(self, state, action, reward, next_state, done):
-        state_idx = self._get_state_index(state)
-        next_state_idx = self._get_state_index(next_state)
-
-        old_value = self.q_table[state_idx + (action,)]
-        next_max = np.max(self.q_table[next_state_idx])
-
-        new_value = old_value + self.learning_rate * (reward + self.discount_factor * next_max * (1 - done) - old_value)
-        self.q_table[state_idx + (action,)] = new_value
-
-    def decay_epsilon(self):
-        self.epsilon = max(self.min_epsilon, self.epsilon - self.epsilon_decay_rate)
-
-def train_q_learning(env_name='CartPole-v1', num_episodes=1000):
-    env = gym.make(env_name)
-    agent = QLearningAgent(env)
-
-    rewards_per_episode = []
-
-    for episode in range(num_episodes):
-        state, info = env.reset()
-        done = False
-        truncated = False
-        episode_reward = 0
-
-        while not done and not truncated:
-            action = agent.choose_action(state)
-            next_state, reward, done, truncated, info = env.step(action)
-            agent.update_q_table(state, action, reward, next_state, done or truncated)
-            state = next_state
-            episode_reward += reward
+        """
+        Chooses an action based on the epsilon-greedy policy.
         
-        agent.decay_epsilon()
-        rewards_per_episode.append(episode_reward)
+        Args:
+            state (int): The current state.
+            
+        Returns:
+            int: The chosen action.
+        """
+        # Exploration: choose a random action
+        if random.uniform(0, 1) < self.exploration_rate:
+            action = random.randint(0, self.num_actions - 1)
+            logger.debug(f"State {state}: Exploring - chose random action {action}")
+            return action
+        
+        # Exploitation: choose the action with the highest Q-value for the current state
+        # If multiple actions have the same max Q-value, choose randomly among them
+        q_values = self.q_table[state, :]
+        max_q = np.max(q_values)
+        best_actions = np.where(q_values == max_q)[0]
+        action = random.choice(best_actions)
+        logger.debug(f"State {state}: Exploiting - chose best action {action} with Q-value {max_q}")
+        return action
 
-        if (episode + 1) % 100 == 0:
-            print(f"Episode {episode + 1}: Total Reward = {episode_reward}, Epsilon = {agent.epsilon:.2f}")
+    def update_q_value(self, state, action, reward, next_state, done):
+        """
+        Updates the Q-value for a given state-action pair using the Q-learning update rule.
+        
+        Args:
+            state (int): The current state.
+            action (int): The action taken.
+            reward (float): The reward received.
+            next_state (int): The resulting state.
+            done (bool): Whether the episode has ended.
+        """
+        # Get the maximum Q-value for the next state
+        if done:
+            max_next_q = 0.0 # No future rewards if the episode is done
+        else:
+            max_next_q = np.max(self.q_table[next_state, :])
+            
+        # Calculate the new Q-value
+        current_q = self.q_table[state, action]
+        new_q = current_q + self.learning_rate * (reward + self.discount_factor * max_next_q - current_q)
+        
+        # Update the Q-table
+        self.q_table[state, action] = new_q
+        logger.debug(f"Updated Q-value for state {state}, action {action}: {current_q:.4f} -> {new_q:.4f}")
 
-    env.close()
-    print("
-Training finished.")
+    def decay_exploration_rate(self):
+        """
+        Decays the exploration rate according to the decay factor.
+        """
+        self.exploration_rate = max(self.min_exploration_rate, self.exploration_rate * self.exploration_decay)
+        logger.debug(f"Exploration rate decayed to {self.exploration_rate:.4f}")
 
-    # Plotting results
-    plt.figure(figsize=(10, 6))
-    plt.plot(rewards_per_episode)
-    plt.title(f'Q-Learning Training on {env_name}' )
-    plt.xlabel('Episode')
-    plt.ylabel('Total Reward')
-    plt.grid(True)
-    plt.savefig(f'q_learning_{env_name}_rewards.png')
-    plt.show()
+    def get_optimal_policy(self):
+        """
+        Returns the optimal policy derived from the learned Q-table.
+        
+        Returns:
+            np.ndarray: An array where the i-th element is the optimal action for state i.
+        """
+        return np.argmax(self.q_table, axis=1)
 
-if __name__ == '__main__':
-    train_q_learning(env_name='CartPole-v1', num_episodes=500) # Reduced episodes for faster execution
+if __name__ == "__main__":
+    # Example usage: A simple grid world environment
+    logger.info("Running example for QLearningAgent in a simple environment...")
+    
+    # Define a simple environment: 5 states, 2 actions (left, right)
+    # Goal is state 4, starting at state 0
+    num_states = 5
+    num_actions = 2
+    
+    agent = QLearningAgent(num_states, num_actions)
+    
+    # Training loop
+    num_episodes = 100
+    for episode in range(num_episodes):
+        state = 0 # Start state
+        done = False
+        total_reward = 0
+        
+        while not done:
+            action = agent.choose_action(state)
+            
+            # Simulate environment step
+            if action == 1: # Move right
+                next_state = min(state + 1, num_states - 1)
+            else: # Move left
+                next_state = max(state - 1, 0)
+                
+            # Reward logic
+            if next_state == num_states - 1:
+                reward = 10 # Reached goal
+                done = True
+            else:
+                reward = -1 # Step penalty
+                
+            agent.update_q_value(state, action, reward, next_state, done)
+            state = next_state
+            total_reward += reward
+            
+        agent.decay_exploration_rate()
+        if (episode + 1) % 20 == 0:
+            logger.info(f"Episode {episode + 1}/{num_episodes} completed. Total Reward: {total_reward}")
+            
+    # Print learned Q-table and optimal policy
+    logger.info("Training complete.")
+    logger.info(f"Learned Q-table:\n{agent.q_table}")
+    logger.info(f"Optimal Policy: {agent.get_optimal_policy()}")
