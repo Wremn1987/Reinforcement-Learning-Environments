@@ -1,132 +1,157 @@
-# src/dqn_agent.py
-
-import gymnasium as gym
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
+import numpy as np
 from collections import deque
-import matplotlib.pyplot as plt
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(levelname)s - %(message)s\')
+logger = logging.getLogger(__name__)
 
 class DQN(nn.Module):
-    """Deep Q-Network (DQN) model."""
+    """
+    Deep Q-Network (DQN) architecture.
+    A simple feedforward neural network that takes the state as input
+    and outputs Q-values for each action.
+    """
     def __init__(self, state_size, action_size):
         super(DQN, self).__init__()
         self.fc1 = nn.Linear(state_size, 64)
-        self.relu = nn.ReLU()
+        self.relu1 = nn.ReLU()
         self.fc2 = nn.Linear(64, 64)
+        self.relu2 = nn.ReLU()
         self.fc3 = nn.Linear(64, action_size)
 
     def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
+        x = self.relu1(self.fc1(x))
+        x = self.relu2(self.fc2(x))
         return self.fc3(x)
 
 class DQNAgent:
     """
-    A Deep Q-Network (DQN) agent implementation.
+    A Deep Q-Learning agent that uses a neural network to approximate the Q-function.
+    It employs experience replay and a target network for stable learning.
     """
-    def __init__(self, env, state_size, action_size, learning_rate=0.001, discount_factor=0.99, epsilon=1.0, epsilon_decay_rate=0.005, min_epsilon=0.01, replay_buffer_size=10000, batch_size=64):
-        self.env = env
+    def __init__(self, state_size, action_size, seed=42):
         self.state_size = state_size
         self.action_size = action_size
-        self.learning_rate = learning_rate
-        self.discount_factor = discount_factor
-        self.epsilon = epsilon
-        self.epsilon_decay_rate = epsilon_decay_rate
-        self.min_epsilon = min_epsilon
-        self.batch_size = batch_size
+        self.seed = random.seed(seed)
 
-        self.memory = deque(maxlen=replay_buffer_size) # Replay buffer
-        self.model = DQN(state_size, action_size)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        logger.info(f"DQNAgent initialized on device: {self.device}")
+
+        # Q-Network
+        self.qnetwork_local = DQN(state_size, action_size).to(self.device)
+        self.qnetwork_target = DQN(state_size, action_size).to(self.device)
+        self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=5e-4)
         self.criterion = nn.MSELoss()
 
-    def remember(self, state, action, reward, next_state, done):
+        # Replay memory
+        self.memory = deque(maxlen=int(1e5))  # D_SIZE
+        self.batch_size = 64
+        self.gamma = 0.99  # Discount factor
+        self.tau = 1e-3  # For soft update of target parameters
+        self.lr = 5e-4 # Learning rate
+        self.update_every = 4 # How often to update the network
+
+        self.t_step = 0
+
+    def step(self, state, action, reward, next_state, done):
+        # Save experience in replay memory
         self.memory.append((state, action, reward, next_state, done))
 
-    def choose_action(self, state):
-        if random.uniform(0, 1) < self.epsilon:
-            return self.env.action_space.sample()
+        # Learn every update_every time steps.
+        self.t_step = (self.t_step + 1) % self.update_every
+        if self.t_step == 0:
+            # If enough samples are available in memory, get random subset and learn
+            if len(self.memory) > self.batch_size:
+                experiences = self._sample_experiences()
+                self._learn(experiences, self.gamma)
+
+    def choose_action(self, state, eps=0.0):
+        """
+        Returns actions for given state as per epsilon-greedy policy.
+        """
+        state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+        self.qnetwork_local.eval()
+        with torch.no_grad():
+            action_values = self.qnetwork_local(state)
+        self.qnetwork_local.train()
+
+        if random.random() > eps:
+            return np.argmax(action_values.cpu().data.numpy())
         else:
-            state = torch.from_numpy(state).float().unsqueeze(0)
-            with torch.no_grad():
-                q_values = self.model(state)
-            return torch.argmax(q_values).item()
+            return random.choice(np.arange(self.action_size))
 
-    def learn(self):
-        if len(self.memory) < self.batch_size:
-            return
+    def _sample_experiences(self):
+        """
+        Randomly sample a batch of experiences from memory.
+        """
+        experiences = random.sample(self.memory, k=self.batch_size)
 
-        minibatch = random.sample(self.memory, self.batch_size)
-        states, actions, rewards, next_states, dones = zip(*minibatch)
+        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(self.device)
+        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).long().to(self.device)
+        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(self.device)
+        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(self.device)
+        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(self.device)
 
-        states = torch.from_numpy(np.vstack(states)).float()
-        actions = torch.from_numpy(np.vstack(actions)).long()
-        rewards = torch.from_numpy(np.vstack(rewards)).float()
-        next_states = torch.from_numpy(np.vstack(next_states)).float()
-        dones = torch.from_numpy(np.vstack(dones).astype(np.uint8)).float()
+        return (states, actions, rewards, next_states, dones)
 
-        # Compute Q-values for current states
-        current_q_values = self.model(states).gather(1, actions)
+    def _learn(self, experiences, gamma):
+        """
+        Update value parameters using given batch of experience tuples.
+        """
+        states, actions, rewards, next_states, dones = experiences
 
-        # Compute target Q-values
-        next_q_values = self.model(next_states).detach().max(1)[0].unsqueeze(1)
-        target_q_values = rewards + (self.discount_factor * next_q_values * (1 - dones))
+        # Get max predicted Q values (for next states) from target model
+        Q_targets_next = self.qnetwork_target(next_states).detach().max(1)[0].unsqueeze(1)
+        # Compute Q targets for current states
+        Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
 
-        # Compute loss and update model
-        loss = self.criterion(current_q_values, target_q_values)
+        # Get expected Q values from local model
+        Q_expected = self.qnetwork_local(states).gather(1, actions)
+
+        # Compute loss
+        loss = self.criterion(Q_expected, Q_targets)
+        # Minimize the loss
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-    def decay_epsilon(self):
-        self.epsilon = max(self.min_epsilon, self.epsilon - self.epsilon_decay_rate)
+        # Update target network
+        self._soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
 
-def train_dqn(env_name='CartPole-v1', num_episodes=1000):
-    env = gym.make(env_name)
-    state_size = env.observation_space.shape[0]
-    action_size = env.action_space.n
+    def _soft_update(self, local_model, target_model, tau):
+        """
+        Soft update model parameters. θ_target = τ*θ_local + (1 - τ)*θ_target
+        """
+        for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
+            target_param.data.copy_(tau*local_param.data + (1.0-tau)*target_param.data)
 
-    agent = DQNAgent(env, state_size, action_size)
-
-    rewards_per_episode = []
-
-    for episode in range(num_episodes):
-        state, info = env.reset()
-        state = np.reshape(state, [1, state_size])
-        done = False
-        truncated = False
-        episode_reward = 0
-
-        while not done and not truncated:
-            action = agent.choose_action(state)
-            next_state, reward, done, truncated, info = env.step(action)
-            next_state = np.reshape(next_state, [1, state_size])
-            agent.remember(state, action, reward, next_state, done or truncated)
-            agent.learn()
-            state = next_state
-            episode_reward += reward
+if __name__ == "__main__":
+    logger.info("Running example for DQNAgent...")
+    
+    # Define a dummy environment for testing
+    state_size = 4 # e.g., cartpole state
+    action_size = 2 # e.g., cartpole actions
+    
+    agent = DQNAgent(state_size, action_size)
+    
+    # Simulate some steps
+    state = np.random.rand(state_size)
+    for i in range(100):
+        action = agent.choose_action(state, eps=0.1)
+        next_state = np.random.rand(state_size)
+        reward = random.choice([-1, 0, 1])
+        done = random.choice([True, False])
         
-        agent.decay_epsilon()
-        rewards_per_episode.append(episode_reward)
-
-        if (episode + 1) % 100 == 0:
-            print(f"Episode {episode + 1}: Total Reward = {episode_reward}, Epsilon = {agent.epsilon:.2f}")
-
-    env.close()
-    print("
-Training finished.")
-
-    # Plotting results
-    plt.figure(figsize=(10, 6))
-    plt.plot(rewards_per_episode)
-    plt.title(f'DQN Training on {env_name}' )
-    plt.xlabel('Episode')
-    plt.ylabel('Total Reward')
-    plt.grid(True)
-    plt.savefig(f'dqn_{env_name}_rewards.png')
-    plt.show()
-
-if __name__ == '__main__':
-    train_dqn(env_name='CartPole-v1', num_episodes=500) # Reduced episodes for faster execution
+        agent.step(state, action, reward, next_state, done)
+        state = next_state
+        
+        if done:
+            state = np.random.rand(state_size)
+            
+    logger.info(f"Memory size: {len(agent.memory)}")
+    logger.info("DQNAgent example completed.")
