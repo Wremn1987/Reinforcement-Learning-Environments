@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+
+# C extensions
+*.so
+*.dll
+*.dylib
+
+# Environments
+.env
+venv/
+env/
+
+# Editor files
+.vscode/
+.idea/
+
+# Jupyter Notebook files
+.ipynb_checkpoints/
+
+# Data
+data/raw/
+data/processed/
+*.csv
+*.json
+*.pkl
+*.pt
+*.h5
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+thumbs.db
